@@ -262,7 +262,7 @@ def main() -> None:
     # models_info = ollama.list()
     # available_models = extract_model_names(models_info)
 
-    models_info = ollama.list(base_url=base_url)
+    models_info = ollama.list()  
     available_models = extract_model_names(models_info)
 
     # Create layout
