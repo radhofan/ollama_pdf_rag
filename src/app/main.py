@@ -13,6 +13,7 @@ import shutil
 import pdfplumber
 import ollama
 import warnings
+import base64
 
 # Suppress torch warning
 warnings.filterwarnings('ignore', category=UserWarning, message='.*torch.classes.*')
@@ -227,7 +228,23 @@ def main() -> None:
     """
     Main function to run the Streamlit application.
     """
-    st.subheader("🧠 Ollama PDF RAG playground", divider="gray", anchor=False)
+
+    def image_to_base64(path: str) -> str:
+        with open(path, "rb") as f:
+            return base64.b64encode(f.read()).decode()
+
+    logo_base64 = image_to_base64("data/assets/Logo.png")
+
+    st.markdown(
+        f"""
+        <h3 style="display: flex; align-items: center; gap: 8px; margin: 0;">
+            <img src="data:image/png;base64,{logo_base64}" width="32">
+            Computing Lab Chatbot
+        </h3>
+        <hr style="border: 1px solid #ddd; margin: 0.5em 0;">
+        """,
+        unsafe_allow_html=True,
+    )
 
     # Get available models
     models_info = ollama.list()
@@ -254,7 +271,7 @@ def main() -> None:
 
     # Add checkbox for sample PDF
     use_sample = col1.toggle(
-        "Use sample PDF (Scammer Agent Paper)", 
+        "Computing Lab PDF", 
         key="sample_checkbox"
     )
     
@@ -268,7 +285,7 @@ def main() -> None:
 
     if use_sample:
         # Use the sample PDF
-        sample_path = "data/pdfs/sample/scammer-agent.pdf"
+        sample_path = "data/pdfs/sample/computing-lab.pdf"
         if os.path.exists(sample_path):
             if st.session_state["vector_db"] is None:
                 with st.spinner("Processing sample PDF..."):
