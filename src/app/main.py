@@ -52,23 +52,23 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-def get_ngrok_url():
+def get_tunnel_url():
     """Get ngrok URL from environment or fallback to default"""
     # Try to get from environment variable first
-    # ngrok_url = os.environ.get("NGROK_URL")
-    # if ngrok_url:
-    #     return ngrok_url.rstrip('/')
+    ngrok_url = os.environ.get("TUNNEL_URL")
+    if ngrok_url:
+        return ngrok_url.rstrip('/')
     
-    # # Try Streamlit secrets
-    # try:
-    #     ngrok_url = st.secrets.get("NGROK_URL")
-    #     if ngrok_url:
-    #         return ngrok_url.rstrip('/')
-    # except:
-    #     pass
+    # Try Streamlit secrets
+    try:
+        ngrok_url = st.secrets.get("TUNNEL_URL")
+        if ngrok_url:
+            return ngrok_url.rstrip('/')
+    except:
+        pass
     
-    # # Fallback to hardcoded (update this with your actual ngrok URL)
-    return "https://15a386eab580.ngrok-free.app"
+    # Fallback to hardcoded (update this with your actual tunnel URL)
+    return "https://your-cloudflare-tunnel-url.trycloudflare.com"
 
 def test_ollama_connection(base_url: str) -> Tuple[bool, str]:
     """Test if Ollama is accessible via the provided URL"""
@@ -130,7 +130,7 @@ def get_available_models(base_url: str) -> Tuple[List[str], str]:
         return [], f"Error getting models: {str(e)}"
 
 # Get base URL
-base_url = get_ngrok_url()
+base_url = get_tunnel_url()
 
 def create_vector_db(file_upload) -> Chroma:
     """
@@ -318,9 +318,9 @@ def main() -> None:
         st.error(f"❌ Connection failed: {connection_msg}")
         st.markdown("""
         ### Troubleshooting Steps:
-        1. **Check ngrok tunnel**: Make sure ngrok is running with `ngrok http 11434 --request-header-add='ngrok-skip-browser-warning:true'`
+        1. **Check Cloudflare tunnel**: Make sure cloudflared is running with `cloudflared tunnel --url http://localhost:11434`
         2. **Verify Ollama**: Test locally with `curl http://localhost:11434/api/tags`
-        3. **Update URL**: Set the correct ngrok URL in environment variables or update the hardcoded URL in the code
+        3. **Update URL**: Set the correct tunnel URL in environment variables or update the hardcoded URL in the code
         4. **Check firewall**: Ensure port 11434 is accessible
         """)
         return
