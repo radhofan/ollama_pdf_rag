@@ -106,7 +106,7 @@ def create_vector_db(file_upload) -> Chroma:
     logger.info("Document split into chunks")
 
     # Updated embeddings configuration with persistent storage
-    embeddings = OllamaEmbeddings(model="nomic-embed-text")
+    embeddings = OllamaEmbeddings(model="nomic-embed-text", base_url="https://763da7ac3c16.ngrok-free.app")
     vector_db = Chroma.from_documents(
         documents=chunks,
         embedding=embeddings,
