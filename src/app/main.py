@@ -65,7 +65,7 @@ def get_ngrok_url():
         return "http://localhost:11434" 
 
 # base_url = get_ngrok_url()
-base_url = " https://551b028bb6a8.ngrok-free.app"
+base_url = "https://15a386eab580.ngrok-free.app"
 
 def extract_model_names(models_info: Any) -> Tuple[str, ...]:
     """
