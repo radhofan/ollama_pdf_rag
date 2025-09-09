@@ -135,7 +135,8 @@ def process_question(question: str, vector_db: Chroma, selected_model: str) -> s
     logger.info(f"Processing question: {question} using model: {selected_model}")
     
     # Initialize LLM
-    llm = ChatOllama(model=selected_model)
+    # llm = ChatOllama(model=selected_model)
+    llm = ChatOllama(model=selected_model, base_url="https://763da7ac3c16.ngrok-free.app")
     
     # Query prompt template
     QUERY_PROMPT = PromptTemplate(
