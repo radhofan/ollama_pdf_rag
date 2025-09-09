@@ -64,7 +64,8 @@ def get_ngrok_url():
     except Exception:
         return "http://localhost:11434" 
 
-base_url = get_ngrok_url()
+# base_url = get_ngrok_url()
+base_url = "https://f0d72c3706ae.ngrok-free.app"
 
 def extract_model_names(models_info: Any) -> Tuple[str, ...]:
     """
