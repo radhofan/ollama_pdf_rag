@@ -64,6 +64,7 @@ def get_ngrok_url():
     except Exception:
         return "http://localhost:11434" 
 
+base_url = get_ngrok_url()
 
 def extract_model_names(models_info: Any) -> Tuple[str, ...]:
     """
@@ -117,7 +118,7 @@ def create_vector_db(file_upload) -> Chroma:
     logger.info("Document split into chunks")
 
     # Updated embeddings configuration with persistent storage
-    embeddings = OllamaEmbeddings(model="nomic-embed-text")
+    embeddings = OllamaEmbeddings(model="nomic-embed-text", base_url=base_url)
     vector_db = Chroma.from_documents(
         documents=chunks,
         embedding=embeddings,
@@ -146,7 +147,7 @@ def process_question(question: str, vector_db: Chroma, selected_model: str) -> s
     logger.info(f"Processing question: {question} using model: {selected_model}")
     
     # Initialize LLM
-    llm = ChatOllama(model=selected_model)
+    llm = ChatOllama(model=selected_model, base_url=base_url)
     
     # Query prompt template
     QUERY_PROMPT = PromptTemplate(
@@ -260,11 +261,8 @@ def main() -> None:
     # Get available models
     # models_info = ollama.list()
     # available_models = extract_model_names(models_info)
-    
-    base_url = get_ngrok_url()
-    ollama_client = ollama.Ollama(base_url=base_url)
 
-    models_info = ollama_client.list()
+    models_info = ollama.list(base_url=base_url)
     available_models = extract_model_names(models_info)
 
     # Create layout
