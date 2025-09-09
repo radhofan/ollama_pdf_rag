@@ -11,10 +11,9 @@ import os
 import tempfile
 import shutil
 import pdfplumber
+import ollama
 import warnings
 import base64
-import requests
-from typing import List, Tuple, Dict, Any, Optional
 
 # Suppress torch warning
 warnings.filterwarnings('ignore', category=UserWarning, message='.*torch.classes.*')
@@ -28,9 +27,17 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_ollama import ChatOllama
 from langchain_core.runnables import RunnablePassthrough
 from langchain.retrievers.multi_query import MultiQueryRetriever
+from typing import List, Tuple, Dict, Any, Optional
 
 # Set protobuf environment variable to avoid error messages
+# This might cause some issues with latency but it's a tradeoff
 os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
+
+# 🔹 Ensure Ollama uses tunnel URL if provided
+if "TUNNEL_URL" in st.secrets:
+    os.environ["OLLAMA_HOST"] = st.secrets["TUNNEL_URL"]
+elif "TUNNEL_URL" in os.environ:
+    os.environ["OLLAMA_HOST"] = os.environ["TUNNEL_URL"]
 
 # Define persistent directory for ChromaDB
 PERSIST_DIRECTORY = os.path.join("data", "vectors")
@@ -52,199 +59,140 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-def get_tunnel_url():
-    """Get ngrok URL from environment or fallback to default"""
-    # Try to get from environment variable first
-    ngrok_url = os.environ.get("TUNNEL_URL")
-    if ngrok_url:
-        return ngrok_url.rstrip('/')
-    
-    # Try Streamlit secrets
-    try:
-        ngrok_url = st.secrets.get("TUNNEL_URL")
-        if ngrok_url:
-            return ngrok_url.rstrip('/')
-    except:
-        pass
-    
-    # Fallback to hardcoded (update this with your actual tunnel URL)
-    return "https://your-cloudflare-tunnel-url.trycloudflare.com"
 
-def test_ollama_connection(base_url: str) -> Tuple[bool, str]:
-    """Test if Ollama is accessible via the provided URL"""
+def extract_model_names(models_info: Any) -> Tuple[str, ...]:
+    """
+    Extract model names from the provided models information.
+
+    Args:
+        models_info: Response from ollama.list()
+
+    Returns:
+        Tuple[str, ...]: A tuple of model names.
+    """
+    logger.info("Extracting model names from models_info")
     try:
-        # Add ngrok bypass headers for free plan
-        headers = {
-            'ngrok-skip-browser-warning': 'true',
-            'User-Agent': 'StreamlitApp/1.0',
-            'Accept': 'application/json'
-        }
-        
-        # Test with direct HTTP request first
-        response = requests.get(f"{base_url}/api/tags", headers=headers, timeout=30)
-        
-        if response.status_code == 200:
-            models_data = response.json()
-            logger.info(f"Successfully connected to Ollama. Models: {models_data}")
-            return True, "Connected successfully"
+        # The new response format returns a list of Model objects
+        if hasattr(models_info, "models"):
+            # Extract model names from the Model objects
+            model_names = tuple(model.model for model in models_info.models)
         else:
-            error_msg = f"HTTP {response.status_code}: {response.text[:200]}"
-            logger.error(f"HTTP request failed: {error_msg}")
-            return False, error_msg
+            # Fallback for any other format
+            model_names = tuple()
             
-    except requests.exceptions.Timeout:
-        error_msg = "Connection timeout - ngrok tunnel may be slow or down"
-        logger.error(error_msg)
-        return False, error_msg
-    except requests.exceptions.ConnectionError:
-        error_msg = "Connection refused - check if ngrok tunnel is running"
-        logger.error(error_msg)
-        return False, error_msg
+        logger.info(f"Extracted model names: {model_names}")
+        return model_names
     except Exception as e:
-        error_msg = f"Connection error: {str(e)}"
-        logger.error(f"Failed to connect to Ollama at {base_url}: {e}")
-        return False, error_msg
+        logger.error(f"Error extracting model names: {e}")
+        return tuple()
 
-def get_available_models(base_url: str) -> Tuple[List[str], str]:
-    """Get available models from Ollama"""
-    try:
-        headers = {
-            'ngrok-skip-browser-warning': 'true',
-            'User-Agent': 'StreamlitApp/1.0',
-            'Accept': 'application/json'
-        }
-        
-        response = requests.get(f"{base_url}/api/tags", headers=headers, timeout=30)
-        
-        if response.status_code == 200:
-            models_data = response.json()
-            if 'models' in models_data and models_data['models']:
-                model_names = [model.get('name', model.get('model', '')) for model in models_data['models']]
-                return model_names, "Success"
-            else:
-                return [], "No models found"
-        else:
-            return [], f"HTTP {response.status_code}: {response.text[:200]}"
-            
-    except Exception as e:
-        return [], f"Error getting models: {str(e)}"
-
-# Get base URL
-base_url = get_tunnel_url()
 
 def create_vector_db(file_upload) -> Chroma:
     """
     Create a vector database from an uploaded PDF file.
+
+    Args:
+        file_upload (st.UploadedFile): Streamlit file upload object containing the PDF.
+
+    Returns:
+        Chroma: A vector store containing the processed document chunks.
     """
     logger.info(f"Creating vector DB from file upload: {file_upload.name}")
     temp_dir = tempfile.mkdtemp()
 
-    try:
-        path = os.path.join(temp_dir, file_upload.name)
-        with open(path, "wb") as f:
-            f.write(file_upload.getvalue())
-            logger.info(f"File saved to temporary path: {path}")
-            
+    path = os.path.join(temp_dir, file_upload.name)
+    with open(path, "wb") as f:
+        f.write(file_upload.getvalue())
+        logger.info(f"File saved to temporary path: {path}")
         loader = UnstructuredPDFLoader(path)
         data = loader.load()
 
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=7500, chunk_overlap=100)
-        chunks = text_splitter.split_documents(data)
-        logger.info("Document split into chunks")
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=7500, chunk_overlap=100)
+    chunks = text_splitter.split_documents(data)
+    logger.info("Document split into chunks")
 
-        # Create embeddings - LangChain handles the HTTP requests internally
-        try:
-            embeddings = OllamaEmbeddings(
-                model="nomic-embed-text", 
-                base_url=base_url
-            )
-            # Test embeddings by embedding a small text
-            test_embedding = embeddings.embed_query("test")
-            logger.info("Embeddings model working correctly")
-        except Exception as e:
-            logger.error(f"Failed to create embeddings: {e}")
-            raise Exception(f"Cannot connect to Ollama embeddings model. Error: {e}")
+    # Updated embeddings configuration with persistent storage
+    embeddings = OllamaEmbeddings(model="nomic-embed-text")
+    vector_db = Chroma.from_documents(
+        documents=chunks,
+        embedding=embeddings,
+        persist_directory=PERSIST_DIRECTORY,
+        collection_name=f"pdf_{hash(file_upload.name)}"  # Unique collection name per file
+    )
+    logger.info("Vector DB created with persistent storage")
 
-        # Ensure persist directory exists
-        os.makedirs(PERSIST_DIRECTORY, exist_ok=True)
-        
-        vector_db = Chroma.from_documents(
-            documents=chunks,
-            embedding=embeddings,
-            persist_directory=PERSIST_DIRECTORY,
-            collection_name=f"pdf_{hash(file_upload.name)}"
-        )
-        logger.info("Vector DB created with persistent storage")
-        
-    except Exception as e:
-        logger.error(f"Error creating vector DB: {e}")
-        raise
-    finally:
-        # Clean up temp directory
-        if os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
-            logger.info(f"Temporary directory {temp_dir} removed")
-    
+    shutil.rmtree(temp_dir)
+    logger.info(f"Temporary directory {temp_dir} removed")
     return vector_db
+
 
 def process_question(question: str, vector_db: Chroma, selected_model: str) -> str:
     """
     Process a user question using the vector database and selected language model.
+
+    Args:
+        question (str): The user's question.
+        vector_db (Chroma): The vector database containing document embeddings.
+        selected_model (str): The name of the selected language model.
+
+    Returns:
+        str: The generated response to the user's question.
     """
     logger.info(f"Processing question: {question} using model: {selected_model}")
     
-    try:
-        # Initialize LLM - LangChain handles HTTP requests internally
-        llm = ChatOllama(
-            model=selected_model, 
-            base_url=base_url
-        )
-        
-        # Query prompt template
-        QUERY_PROMPT = PromptTemplate(
-            input_variables=["question"],
-            template="""You are an AI language model assistant. Your task is to generate 2
-            different versions of the given user question to retrieve relevant documents from
-            a vector database. By generating multiple perspectives on the user question, your
-            goal is to help the user overcome some of the limitations of the distance-based
-            similarity search. Provide these alternative questions separated by newlines.
-            Original question: {question}""",
-        )
+    # Initialize LLM
+    llm = ChatOllama(model=selected_model)
+    
+    # Query prompt template
+    QUERY_PROMPT = PromptTemplate(
+        input_variables=["question"],
+        template="""You are an AI language model assistant. Your task is to generate 2
+        different versions of the given user question to retrieve relevant documents from
+        a vector database. By generating multiple perspectives on the user question, your
+        goal is to help the user overcome some of the limitations of the distance-based
+        similarity search. Provide these alternative questions separated by newlines.
+        Original question: {question}""",
+    )
 
-        # Set up retriever
-        retriever = MultiQueryRetriever.from_llm(
-            vector_db.as_retriever(), 
-            llm,
-            prompt=QUERY_PROMPT
-        )
+    # Set up retriever
+    retriever = MultiQueryRetriever.from_llm(
+        vector_db.as_retriever(), 
+        llm,
+        prompt=QUERY_PROMPT
+    )
 
-        # RAG prompt template
-        template = """Answer the question based ONLY on the following context:
-        {context}
-        Question: {question}
-        """
+    # RAG prompt template
+    template = """Answer the question based ONLY on the following context:
+    {context}
+    Question: {question}
+    """
 
-        prompt = ChatPromptTemplate.from_template(template)
+    prompt = ChatPromptTemplate.from_template(template)
 
-        # Create chain
-        chain = (
-            {"context": retriever, "question": RunnablePassthrough()}
-            | prompt
-            | llm
-            | StrOutputParser()
-        )
+    # Create chain
+    chain = (
+        {"context": retriever, "question": RunnablePassthrough()}
+        | prompt
+        | llm
+        | StrOutputParser()
+    )
 
-        response = chain.invoke(question)
-        logger.info("Question processed and response generated")
-        return response
-        
-    except Exception as e:
-        logger.error(f"Error processing question: {e}")
-        return f"Error processing your question: {str(e)}. Please check your Ollama connection and try again."
+    response = chain.invoke(question)
+    logger.info("Question processed and response generated")
+    return response
+
 
 @st.cache_data
 def extract_all_pages_as_images(file_upload) -> List[Any]:
-    """Extract all pages from a PDF file as images."""
+    """
+    Extract all pages from a PDF file as images.
+
+    Args:
+        file_upload (st.UploadedFile): Streamlit file upload object containing the PDF.
+
+    Returns:
+        List[Any]: A list of image objects representing each page of the PDF.
+    """
     logger.info(f"Extracting all pages as images from file: {file_upload.name}")
     pdf_pages = []
     with pdfplumber.open(file_upload) as pdf:
@@ -252,11 +200,18 @@ def extract_all_pages_as_images(file_upload) -> List[Any]:
     logger.info("PDF pages extracted as images")
     return pdf_pages
 
+
 def delete_vector_db(vector_db: Optional[Chroma]) -> None:
-    """Delete the vector database and clear related session state."""
+    """
+    Delete the vector database and clear related session state.
+
+    Args:
+        vector_db (Optional[Chroma]): The vector database to be deleted.
+    """
     logger.info("Deleting vector DB")
     if vector_db is not None:
         try:
+            # Delete the collection
             vector_db.delete_collection()
             
             # Clear session state
@@ -274,64 +229,32 @@ def delete_vector_db(vector_db: Optional[Chroma]) -> None:
         st.error("No vector database found to delete.")
         logger.warning("Attempted to delete vector DB, but none was found")
 
+
 def main() -> None:
-    """Main function to run the Streamlit application."""
+    """
+    Main function to run the Streamlit application.
+    """
 
     def image_to_base64(path: str) -> str:
-        """Convert image to base64, with error handling"""
-        try:
-            if os.path.exists(path):
-                with open(path, "rb") as f:
-                    return base64.b64encode(f.read()).decode()
-        except Exception as e:
-            logger.warning(f"Could not load logo: {e}")
-        return ""
+        with open(path, "rb") as f:
+            return base64.b64encode(f.read()).decode()
 
-    # Display header (with or without logo)
-    logo_path = "data/assets/Logo.png"
-    logo_base64 = image_to_base64(logo_path)
-    
-    if logo_base64:
-        st.markdown(
-            f"""
-            <h3 style="display: flex; align-items: center; gap: 8px; margin: 0;">
-                <img src="data:image/png;base64,{logo_base64}" width="32">
-                Computing Lab Chatbot
-            </h3>
-            <hr style="border: 1px solid #ddd; margin: 0.5em 0;">
-            """,
-            unsafe_allow_html=True,
-        )
-    else:
-        st.title("🤖 Computing Lab Chatbot")
-        st.markdown("---")
+    logo_base64 = image_to_base64("data/assets/Logo.png")
 
-    # Display current ngrok URL
-    st.info(f"🔗 Connecting to Ollama at: {base_url}")
-
-    # Test connection
-    is_connected, connection_msg = test_ollama_connection(base_url)
-    
-    if is_connected:
-        st.success(f"✅ {connection_msg}")
-    else:
-        st.error(f"❌ Connection failed: {connection_msg}")
-        st.markdown("""
-        ### Troubleshooting Steps:
-        1. **Check Cloudflare tunnel**: Make sure cloudflared is running with `cloudflared tunnel --url http://localhost:11434`
-        2. **Verify Ollama**: Test locally with `curl http://localhost:11434/api/tags`
-        3. **Update URL**: Set the correct tunnel URL in environment variables or update the hardcoded URL in the code
-        4. **Check firewall**: Ensure port 11434 is accessible
-        """)
-        return
+    st.markdown(
+        f"""
+        <h3 style="display: flex; align-items: center; gap: 8px; margin: 0;">
+            <img src="data:image/png;base64,{logo_base64}" width="32">
+            Computing Lab Chatbot
+        </h3>
+        <hr style="border: 1px solid #ddd; margin: 0.5em 0;">
+        """,
+        unsafe_allow_html=True,
+    )
 
     # Get available models
-    available_models, models_msg = get_available_models(base_url)
-    
-    if not available_models:
-        st.error(f"No models available: {models_msg}")
-        st.info("Make sure you have models installed. Run: `ollama pull llama2` or `ollama pull mistral`")
-        return
+    models_info = ollama.list()
+    available_models = extract_model_names(models_info)
 
     # Create layout
     col1, col2 = st.columns([1.5, 2])
@@ -345,11 +268,12 @@ def main() -> None:
         st.session_state["use_sample"] = False
 
     # Model selection
-    selected_model = col2.selectbox(
-        f"Pick a model (Found {len(available_models)} models) ↓", 
-        available_models,
-        key="model_select"
-    )
+    if available_models:
+        selected_model = col2.selectbox(
+            "Pick a model available locally on your system ↓", 
+            available_models,
+            key="model_select"
+        )
 
     # Add checkbox for sample PDF
     use_sample = col1.toggle(
@@ -360,10 +284,7 @@ def main() -> None:
     # Clear vector DB if switching between sample and upload
     if use_sample != st.session_state.get("use_sample"):
         if st.session_state["vector_db"] is not None:
-            try:
-                st.session_state["vector_db"].delete_collection()
-            except:
-                pass
+            st.session_state["vector_db"].delete_collection()
             st.session_state["vector_db"] = None
             st.session_state["pdf_pages"] = None
         st.session_state["use_sample"] = use_sample
@@ -374,33 +295,23 @@ def main() -> None:
         if os.path.exists(sample_path):
             if st.session_state["vector_db"] is None:
                 with st.spinner("Processing sample PDF..."):
-                    try:
-                        loader = UnstructuredPDFLoader(file_path=sample_path)
-                        data = loader.load()
-                        text_splitter = RecursiveCharacterTextSplitter(chunk_size=7500, chunk_overlap=100)
-                        chunks = text_splitter.split_documents(data)
-                        
-                        embeddings = OllamaEmbeddings(
-                            model="nomic-embed-text", 
-                            base_url=base_url
-                        )
-                        os.makedirs(PERSIST_DIRECTORY, exist_ok=True)
-                        
-                        st.session_state["vector_db"] = Chroma.from_documents(
-                            documents=chunks,
-                            embedding=embeddings,
-                            persist_directory=PERSIST_DIRECTORY,
-                            collection_name="sample_pdf"
-                        )
-                        # Display PDF
-                        with pdfplumber.open(sample_path) as pdf:
-                            st.session_state["pdf_pages"] = [page.to_image().original for page in pdf.pages]
-                    except Exception as e:
-                        st.error(f"Error processing sample PDF: {e}")
+                    loader = UnstructuredPDFLoader(file_path=sample_path)
+                    data = loader.load()
+                    text_splitter = RecursiveCharacterTextSplitter(chunk_size=7500, chunk_overlap=100)
+                    chunks = text_splitter.split_documents(data)
+                    st.session_state["vector_db"] = Chroma.from_documents(
+                        documents=chunks,
+                        embedding=OllamaEmbeddings(model="nomic-embed-text"),
+                        persist_directory=PERSIST_DIRECTORY,
+                        collection_name="sample_pdf"
+                    )
+                    # Open and display the sample PDF
+                    with pdfplumber.open(sample_path) as pdf:
+                        st.session_state["pdf_pages"] = [page.to_image().original for page in pdf.pages]
         else:
-            st.error("Sample PDF file not found.")
+            st.error("Sample PDF file not found in the current directory.")
     else:
-        # Regular file upload
+        # Regular file upload with unique key
         file_upload = col1.file_uploader(
             "Upload a PDF file ↓", 
             type="pdf", 
@@ -411,14 +322,12 @@ def main() -> None:
         if file_upload:
             if st.session_state["vector_db"] is None:
                 with st.spinner("Processing uploaded PDF..."):
-                    try:
-                        st.session_state["vector_db"] = create_vector_db(file_upload)
-                        st.session_state["file_upload"] = file_upload
-                        # Extract and store PDF pages
-                        with pdfplumber.open(file_upload) as pdf:
-                            st.session_state["pdf_pages"] = [page.to_image().original for page in pdf.pages]
-                    except Exception as e:
-                        st.error(f"Error processing PDF: {e}")
+                    st.session_state["vector_db"] = create_vector_db(file_upload)
+                    # Store the uploaded file in session state
+                    st.session_state["file_upload"] = file_upload
+                    # Extract and store PDF pages
+                    with pdfplumber.open(file_upload) as pdf:
+                        st.session_state["pdf_pages"] = [page.to_image().original for page in pdf.pages]
 
     # Display PDF if pages are available
     if "pdf_pages" in st.session_state and st.session_state["pdf_pages"]:
@@ -474,20 +383,22 @@ def main() -> None:
                                 prompt, st.session_state["vector_db"], selected_model
                             )
                             st.markdown(response)
-                            # Add assistant response to chat history
-                            st.session_state["messages"].append(
-                                {"role": "assistant", "content": response}
-                            )
                         else:
-                            warning_msg = "Please upload a PDF file first."
-                            st.warning(warning_msg)
+                            st.warning("Please upload a PDF file first.")
+
+                # Add assistant response to chat history
+                if st.session_state["vector_db"] is not None:
+                    st.session_state["messages"].append(
+                        {"role": "assistant", "content": response}
+                    )
 
             except Exception as e:
-                st.error(f"Error: {e}", icon="⛔️")
+                st.error(e, icon="⛔️")
                 logger.error(f"Error processing prompt: {e}")
         else:
             if st.session_state["vector_db"] is None:
                 st.warning("Upload a PDF file or use the sample PDF to begin chat...")
+
 
 if __name__ == "__main__":
     main()
